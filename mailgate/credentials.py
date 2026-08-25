@@ -48,7 +48,31 @@ def set_secret(service: str, account: str, value: str) -> None:
         "-U",  # update if it already exists
     )
     if result.returncode != 0:
-        raise CredentialError(f"keychain write failed: {result.stderr.strip()}")
+        raise CredentialError(
+            "keychain write failed: "
+            f"{result.stderr.strip()}\n\n"
+            "This usually means the login keychain is locked or the terminal "
+            "lacks keychain access. Fix it with:\n"
+            "  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
+            "then re-run. (If you are over SSH, run the command locally instead.)"
+        )
+
+
+def ensure_keychain_writable() -> None:
+    """Pre-flight check: verify the keychain accepts writes before prompting
+    the user for any secrets, so they don't type a password only to fail."""
+    probe = "mailgate-probe"
+    try:
+        set_secret(probe, probe, "probe")
+    except CredentialError as exc:
+        raise CredentialError(
+            "Keychain is not writable from this session. "
+            "Unlock it first:\n"
+            "  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
+            f"\nOriginal error: {exc}"
+        ) from exc
+    finally:
+        _security("delete-generic-password", "-a", probe, "-s", probe)
 
 
 def get_secret(service: str, account: str) -> str | None:

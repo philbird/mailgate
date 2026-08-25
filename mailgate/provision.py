@@ -44,6 +44,15 @@ def main() -> None:
     args = parser.parse_args()
 
     email = args.email or _prompt_email()
+
+    # Pre-flight: fail fast (before prompting for the App Password) if the
+    # keychain isn't writable from this session.
+    try:
+        credentials.ensure_keychain_writable()
+    except credentials.CredentialError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     app_password = args.app_password or getpass.getpass("Gmail App Password: ")
 
     if not app_password:
