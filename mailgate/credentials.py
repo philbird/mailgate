@@ -1,12 +1,20 @@
 """Credential storage for MailGate.
 
-MailGate never reads credentials from files that an agent could see casually,
-environment variables, or API responses. Secrets live in one of two backends:
+MailGate never reads credentials from environment variables and never returns
+them in API responses. Secrets live in one of two backends:
 
     * ``keychain`` — the macOS login Keychain via the ``security`` CLI
-      (preferred on a local Mac, where hardware-backed storage is available).
-    * ``file``     — a ``0600`` JSON file at ``~/.hermes/mailgate/credentials.json``
-      (fallback when the Keychain is unavailable — e.g. over SSH — or on non-macOS).
+      (preferred: OS-encrypted, unlocked per session).
+    * ``file``     — a plaintext JSON file at ``~/.hermes/mailgate/credentials.json``
+      protected only by ``0600`` POSIX permissions. This is strictly weaker
+      than the Keychain (any process running as the user can read it) and is
+      used only as a fallback when the Keychain is unavailable — e.g. over
+      SSH or on non-macOS. ``mailgate-provision`` warns and asks for
+      confirmation before auto-falling back to it.
+
+Writes are authoritative: provisioning to one backend removes the same
+entries from the other, so a stale Keychain value can never shadow a newer
+file-backend token (reads prefer the Keychain).
 
 Layout (Keychain: ``service = MAILGATE_KEYCHAIN_SERVICE``, default ``mailgate``):
 
@@ -47,7 +55,17 @@ class CredentialError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def _security(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["security", *args], capture_output=True, text=True)
+    try:
+        return subprocess.run(["security", *args], capture_output=True, text=True)
+    except FileNotFoundError:
+        # Non-macOS: no `security` binary. Report failure instead of crashing
+        # so callers fall through to the file backend.
+        return subprocess.CompletedProcess(
+            args=["security", *args],
+            returncode=127,
+            stdout="",
+            stderr="`security` CLI not available (not macOS)",
+        )
 
 
 def _keychain_set(service: str, account: str, value: str) -> None:
@@ -69,6 +87,10 @@ def _keychain_set(service: str, account: str, value: str) -> None:
             "  security unlock-keychain ~/Library/Keychains/login.keychain-db\n"
             "or use the file backend: --backend file"
         )
+
+
+def _keychain_delete(service: str, account: str) -> None:
+    _security("delete-generic-password", "-a", account, "-s", service)
 
 
 def _keychain_get(service: str, account: str) -> str | None:
@@ -135,6 +157,17 @@ def _file_get(service: str, account: str) -> str | None:
     return data.get(service, {}).get(account)
 
 
+def _file_delete(service: str, account: str) -> None:
+    data = _file_read()
+    entries = data.get(service)
+    if not entries or account not in entries:
+        return
+    del entries[account]
+    if not entries:
+        del data[service]
+    _file_write(data)
+
+
 # ---------------------------------------------------------------------------
 # Backend resolution + unified interface
 # ---------------------------------------------------------------------------
@@ -153,12 +186,20 @@ def resolve_backend(requested: str = BACKEND_AUTO) -> str:
 
 
 def set_secret(service: str, account: str, value: str, backend: str = BACKEND_AUTO) -> None:
-    """Store (or overwrite) a secret in the chosen backend."""
+    """Store (or overwrite) a secret in the chosen backend.
+
+    The other backend's entry is removed so the write is authoritative:
+    ``get_secret`` prefers the Keychain, so without the removal a stale
+    Keychain value would shadow a later file-backend provision and the
+    freshly issued token would never authenticate.
+    """
     backend = resolve_backend(backend)
     if backend == BACKEND_KEYCHAIN:
         _keychain_set(service, account, value)
+        _file_delete(service, account)
     else:
         _file_set(service, account, value)
+        _keychain_delete(service, account)
 
 
 def get_secret(service: str, account: str) -> str | None:

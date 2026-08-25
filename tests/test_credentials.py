@@ -12,9 +12,10 @@ from mailgate import credentials as creds
 
 @pytest.fixture()
 def file_backend(monkeypatch, tmp_path):
-    """Point the file backend at a temp path and clear any keychain fallback."""
+    """Point the file backend at a temp path and isolate the real keychain."""
     monkeypatch.setenv("MAILGATE_CREDENTIALS_FILE", str(tmp_path / "creds.json"))
     monkeypatch.setattr(creds, "_keychain_get", lambda service, account: None)
+    monkeypatch.setattr(creds, "_keychain_delete", lambda service, account: None)
     return tmp_path / "creds.json"
 
 
@@ -80,3 +81,41 @@ def test_resolve_backend_rejects_unknown():
 def test_missing_secret_raises(file_backend):
     with pytest.raises(creds.CredentialError):
         creds.get_address("mailgate")
+
+
+def test_security_cli_missing_is_graceful(monkeypatch):
+    """Non-macOS has no `security` binary; the keychain backend must degrade
+    to "unavailable" instead of crashing every credential read."""
+    def raise_fnf(*args, **kwargs):
+        raise FileNotFoundError("security")
+
+    monkeypatch.setattr(creds.subprocess, "run", raise_fnf)
+    assert creds.keychain_writable() is False
+    assert creds._keychain_get("s", "k") is None
+    assert creds.resolve_backend(creds.BACKEND_AUTO) == creds.BACKEND_FILE
+
+
+def test_file_provision_clears_stale_keychain(monkeypatch, tmp_path):
+    """Re-provisioning to the file backend must remove the old Keychain entry,
+    otherwise get_secret (Keychain-first) keeps serving the stale token."""
+    monkeypatch.setenv("MAILGATE_CREDENTIALS_FILE", str(tmp_path / "creds.json"))
+    keychain = {("s", "api-token"): "old-token"}
+    monkeypatch.setattr(creds, "_keychain_get", lambda s, a: keychain.get((s, a)))
+    monkeypatch.setattr(creds, "_keychain_delete", lambda s, a: keychain.pop((s, a), None))
+
+    creds.set_secret("s", "api-token", "new-token", creds.BACKEND_FILE)
+    assert keychain == {}
+    assert creds.get_secret("s", "api-token") == "new-token"
+
+
+def test_keychain_provision_clears_stale_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("MAILGATE_CREDENTIALS_FILE", str(tmp_path / "creds.json"))
+    keychain = {}
+    monkeypatch.setattr(creds, "_keychain_get", lambda s, a: keychain.get((s, a)))
+    monkeypatch.setattr(creds, "_keychain_set", lambda s, a, v: keychain.__setitem__((s, a), v))
+    monkeypatch.setattr(creds, "_keychain_delete", lambda s, a: keychain.pop((s, a), None))
+
+    creds.set_secret("s", "k", "file-value", creds.BACKEND_FILE)
+    creds.set_secret("s", "k", "keychain-value", creds.BACKEND_KEYCHAIN)
+    assert creds._file_get("s", "k") is None
+    assert creds.get_secret("s", "k") == "keychain-value"
