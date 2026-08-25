@@ -136,6 +136,12 @@ leaking a one-time password. Rules are plain data at the top of
 uv run pytest
 ```
 
+## Hermes skill
+
+A ready-to-install [Hermes Agent](https://hermes-agent.nousresearch.com/docs)
+skill lives at [`skills/mailgate/SKILL.md`](skills/mailgate/SKILL.md) — see
+[`skills/README.md`](skills/README.md) for one-command install.
+
 ## License
 
 MIT
