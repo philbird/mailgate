@@ -17,9 +17,9 @@ high-value secrets that should never enter a model's context window. MailGate
 sits between the agent and Gmail and enforces a hard policy:
 
 1. **Zero credential exposure** — the Gmail App Password and the local API
-   token live only in the macOS Keychain (or a `0600` file on non-macOS / SSH
-   sessions). They are never placed in `.env` files and never returned by any
-   API response.
+   token live only in the macOS Keychain, or — with explicit confirmation, on
+   non-macOS / SSH sessions — in a plaintext `0600` file. They are never
+   placed in `.env` files and never returned by any API response.
 2. **Deterministic OTP airgap** — messages matching security rules are
    intercepted *before* the agent sees them: excluded from list/search views
    (or returned masked as `[REDACTED]`), and hard-blocked on read.
@@ -61,9 +61,11 @@ mailgate-provision --email you@gmail.com
 
 It prompts for the App Password (hidden input), stores the address, App
 Password, and a fresh API token, then prints the token. Credentials go to the
-macOS Keychain when writable, or a `0600` file otherwise (SSH sessions, Linux).
-Force a backend with `--backend keychain|file|auto` (default `auto`). **The
-token is never returned by the API** — copy it into your agent's secure config.
+macOS Keychain when writable; otherwise (SSH sessions, Linux) it warns and
+asks for confirmation before falling back to a plaintext `0600` file, which
+any process running as your user can read. Force a backend with
+`--backend keychain|file|auto` (default `auto`). **The token is never returned
+by the API** — copy it into your agent's secure config.
 
 To rotate the token or change the account, just re-run the command.
 

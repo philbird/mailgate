@@ -149,10 +149,10 @@ Rules are plain data at the top of `mailgate/classifier.py`.
 ## Pitfalls
 
 - **Keychain lock / SSH:** macOS refuses login-keychain writes from SSH
-  sessions ("User interaction is not allowed"). `mailgate-provision` auto-falls
-  back to the `0600` file backend in that case, so provisioning over SSH just
-  works. To force the Keychain, run locally and unlock first:
-  `security unlock-keychain ~/Library/Keychains/login.keychain-db`.
+  sessions ("User interaction is not allowed"). `mailgate-provision` warns and
+  asks for confirmation, then falls back to the plaintext `0600` file backend,
+  so provisioning over SSH still works. To force the Keychain, run locally and
+  unlock first: `security unlock-keychain ~/Library/Keychains/login.keychain-db`.
 - **App Password, not account password:** Gmail App Passwords are 16 chars,
   revocable independently. Never use the account password.
 - **`github.com` is not always-blocked** (it sends lots of non-security mail);

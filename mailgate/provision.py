@@ -8,8 +8,9 @@ It prompts for the Gmail App Password (hidden input), stores the address,
 App Password, and a freshly generated API token, then prints the token so the
 agent can be configured to use it.
 
-Credentials go to the macOS Keychain when available, or a ``0600`` file at
-``~/.hermes/mailgate/credentials.json`` otherwise (SSH sessions, Linux). Pass
+Credentials go to the macOS Keychain when available. When it isn't (SSH
+sessions, Linux), ``auto`` asks for confirmation before falling back to a
+plaintext ``0600`` file at ``~/.hermes/mailgate/credentials.json``. Pass
 ``--backend keychain|file|auto`` to override (default: ``auto``).
 
 The App Password is a Gmail *App Password* (16 chars), created at
@@ -57,6 +58,24 @@ def main() -> None:
     # not type a password only to fail on a locked/unreachable keychain.
     backend = credentials.resolve_backend(args.backend)
 
+    # A silent downgrade from Keychain to a plaintext file is a security
+    # decision the user must make, not one `auto` may make for them.
+    if backend == credentials.BACKEND_FILE and args.backend == credentials.BACKEND_AUTO:
+        print(
+            "WARNING: the macOS Keychain is not writable from this session\n"
+            "(locked keychain, SSH, or non-macOS). Credentials — including the\n"
+            "Gmail App Password — would be stored as PLAINTEXT (0600) in:\n"
+            f"  {credentials._file_path()}\n"
+            "Any process running as your user can read that file. To use the\n"
+            "Keychain instead, run locally after:\n"
+            "  security unlock-keychain ~/Library/Keychains/login.keychain-db",
+            file=sys.stderr,
+        )
+        answer = input("Continue with the plaintext file backend? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print("Aborted — nothing was stored.", file=sys.stderr)
+            sys.exit(1)
+
     email = args.email or _prompt_email()
     app_password = args.app_password or getpass.getpass("Gmail App Password: ")
 
@@ -77,7 +96,13 @@ def main() -> None:
     print(f"  Service          : {args.service}")
     print(f"  Gmail address    : {email}")
     print(f"  API token        : {token}")
-    print("\nStore this token in the agent's secure config. It is NOT written to disk.")
+    if backend == credentials.BACKEND_KEYCHAIN:
+        print("\nStore this token in the agent's secure config. It is NOT written to disk.")
+    else:
+        print(
+            "\nStore this token in the agent's secure config. Note: it is also\n"
+            "stored, with the App Password, in the plaintext credentials file above."
+        )
     print("Send it as the Bearer token on every request.")
 
 
