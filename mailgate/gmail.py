@@ -20,8 +20,15 @@ from imapclient import IMAPClient
 # near the top of a message. The read endpoint re-classifies on the full body.
 _PREVIEW_BYTES = 4000
 
-_HEADER_FIELDS = b"BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)]"
-_TEXT_PREVIEW = b"BODY.PEEK[TEXT]<0.%d>" % _PREVIEW_BYTES
+# Full headers (not HEADER.FIELDS) so the preview can be MIME-decoded: the
+# top-level Content-Type/Content-Transfer-Encoding (and multipart boundary)
+# are required to turn BODY[TEXT] bytes into classifiable text.
+_HEADER_REQUEST = b"BODY.PEEK[HEADER]"
+_HEADER_RESPONSE = b"BODY[HEADER]"
+# RFC 3501: partial-fetch responses drop PEEK and the length — a request for
+# BODY.PEEK[TEXT]<0.4000> comes back keyed as BODY[TEXT]<0>.
+_TEXT_PREVIEW_REQUEST = b"BODY.PEEK[TEXT]<0.%d>" % _PREVIEW_BYTES
+_TEXT_PREVIEW_RESPONSE = b"BODY[TEXT]<0>"
 
 
 class GmailClient:
@@ -79,12 +86,12 @@ class GmailClient:
             client.logout()
 
     def _fetch_meta(self, client: IMAPClient, uid: int) -> dict:
-        data = client.fetch([uid], [_HEADER_FIELDS, _TEXT_PREVIEW])
-        raw = data[uid]
-        headers = raw.get(b"BODY[HEADER.FIELDS (FROM SUBJECT DATE)]", b"")
-        preview = raw.get(_TEXT_PREVIEW, b"").decode("utf-8", "replace")
+        data = client.fetch([uid], [_HEADER_REQUEST, _TEXT_PREVIEW_REQUEST])
+        raw = data.get(uid, {})
+        headers = raw.get(_HEADER_RESPONSE, b"")
+        text = raw.get(_TEXT_PREVIEW_RESPONSE, b"")
 
-        msg = BytesParser(policy=policy.default).parsebytes(headers)
+        msg, preview = _decode_preview(headers, text)
         return {
             "id": str(uid),
             "subject": msg.get("Subject", "") or "",
@@ -168,6 +175,27 @@ class GmailClient:
         if reply_all:
             recipients = _dedupe(from_addr + to_addr + cc_addr)
         return [a for a in recipients if a.lower() != self.address.lower()]
+
+
+def _decode_preview(headers: bytes, text: bytes) -> tuple[Message, str]:
+    """Parse full headers + a truncated ``BODY[TEXT]`` into ``(msg, preview)``.
+
+    Reassembling the message lets the email package apply the declared
+    Content-Transfer-Encoding and charset, so base64/quoted-printable bodies
+    are classified (and snippeted) on their decoded text — raw MIME bytes
+    would let an encoded OTP slip past the wording regexes. Truncation can
+    corrupt the tail of an encoded part; decoding is best-effort with a
+    fallback to the raw text.
+    """
+    combined = headers.rstrip(b"\r\n") + b"\r\n\r\n" + text
+    msg = BytesParser(policy=policy.default).parsebytes(combined)
+    if not text:
+        return msg, ""
+    try:
+        preview, _ = _extract_body(msg)
+    except Exception:
+        preview = text.decode("utf-8", "replace")
+    return msg, preview
 
 
 def _extract_body(msg: Message) -> tuple[str, str]:
