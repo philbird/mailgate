@@ -1,8 +1,8 @@
 """Runtime configuration for MailGate.
 
 All values are read from environment variables with safe defaults. No
-credentials live here — they are stored exclusively in the macOS Keychain
-(see ``mailgate.credentials``).
+credentials live here — they are stored in the macOS Keychain or a ``0600``
+file (see ``mailgate.credentials``).
 """
 
 from __future__ import annotations

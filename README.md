@@ -17,8 +17,9 @@ high-value secrets that should never enter a model's context window. MailGate
 sits between the agent and Gmail and enforces a hard policy:
 
 1. **Zero credential exposure** — the Gmail App Password and the local API
-   token live only in the macOS Keychain. They are never written to disk,
-   never placed in `.env` files, and never returned by any API response.
+   token live only in the macOS Keychain (or a `0600` file on non-macOS / SSH
+   sessions). They are never placed in `.env` files and never returned by any
+   API response.
 2. **Deterministic OTP airgap** — messages matching security rules are
    intercepted *before* the agent sees them: excluded from list/search views
    (or returned masked as `[REDACTED]`), and hard-blocked on read.
@@ -30,14 +31,15 @@ sits between the agent and Gmail and enforces a hard policy:
 ```
 Agent ──HTTP──▶ MailGate (FastAPI, 127.0.0.1:8765) ──IMAP/SMTP──▶ Gmail
                     │
-                    ├─ macOS Keychain (App Password + API token)
+                    ├─ macOS Keychain (or 0600 file) — App Password + API token
                     └─ Sensitive-email classifier (regex + sender domains)
 ```
 
 - **Runtime:** Python 3.11+, FastAPI, Uvicorn
 - **Email:** IMAP (`imapclient`) for read/search/trash, SMTP (`smtplib`) for
   send/reply, over TLS with a Gmail **App Password**
-- **Credentials:** macOS Keychain via the `security` CLI
+- **Credentials:** macOS Keychain via the `security` CLI, with a portable
+  `0600` file fallback (`~/.hermes/mailgate/credentials.json`)
 - **Service:** `launchd` plist for background execution
 
 ## Install
@@ -57,10 +59,11 @@ Create a Gmail **App Password** (not your account password) at
 mailgate-provision --email you@gmail.com
 ```
 
-It prompts for the App Password (hidden input), stores the address and App
-Password in the macOS Keychain, generates a fresh API token, stores that too,
-and prints the token. **The token is not written to disk** — copy it into your
-agent's secure config.
+It prompts for the App Password (hidden input), stores the address, App
+Password, and a fresh API token, then prints the token. Credentials go to the
+macOS Keychain when writable, or a `0600` file otherwise (SSH sessions, Linux).
+Force a backend with `--backend keychain|file|auto` (default `auto`). **The
+token is never returned by the API** — copy it into your agent's secure config.
 
 To rotate the token or change the account, just re-run the command.
 
@@ -79,7 +82,7 @@ launchctl load ~/Library/LaunchAgents/com.hermes.mailgate.plist
 
 ## API
 
-All endpoints require `Authorization: Bearer <token>`.
+All endpoints (except `/healthz`) require an `Authorization: Bearer` token.
 
 | Method | Path | Description |
 |---|---|---|

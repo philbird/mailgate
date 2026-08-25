@@ -16,7 +16,8 @@ metadata:
 MailGate is a local FastAPI service that brokers Gmail over IMAP/SMTP while
 **redacting all OTP / 2FA / password-reset / security-verification messages**
 so they can never leak into an agent's context. Credentials live only in the
-macOS Keychain — never in `.env`, files, or API responses.
+macOS Keychain (or a `0600` file on SSH/Linux) — never in `.env` or API
+responses.
 
 Repo: https://github.com/philbird/mailgate
 
@@ -45,7 +46,10 @@ uv sync --extra dev
 
 `mailgate-provision` prompts for the Gmail **App Password** (create at
 https://myaccount.google.com/apppasswords), stores address + App Password +
-a fresh API token in the Keychain (service `mailgate`), and prints the token.
+a fresh API token, and prints the token. The backend is auto-detected: the
+macOS Keychain (service `mailgate`) when writable, else a `0600` file at
+`~/.hermes/mailgate/credentials.json` (SSH sessions, Linux). Override with
+`--backend keychain|file|auto`.
 
 The API token is read from the Keychain at runtime by the service. To call the
 API yourself, read it with:
@@ -120,10 +124,11 @@ Rules are plain data at the top of `mailgate/classifier.py`.
 
 ## Pitfalls
 
-- **Keychain lock:** if provisioning fails with "User interaction is not
-  allowed", the login keychain is locked (or you're over SSH). Run
-  `security unlock-keychain ~/Library/Keychains/login.keychain-db` locally,
-  then re-run. `mailgate-provision` now pre-flights this before prompting.
+- **Keychain lock / SSH:** macOS refuses login-keychain writes from SSH
+  sessions ("User interaction is not allowed"). `mailgate-provision` auto-falls
+  back to the `0600` file backend in that case, so provisioning over SSH just
+  works. To force the Keychain, run locally and unlock first:
+  `security unlock-keychain ~/Library/Keychains/login.keychain-db`.
 - **App Password, not account password:** Gmail App Passwords are 16 chars,
   revocable independently. Never use the account password.
 - **`github.com` is not always-blocked** (it sends lots of non-security mail);
