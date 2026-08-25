@@ -80,9 +80,32 @@ cp launchd/com.hermes.mailgate.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.hermes.mailgate.plist
 ```
 
+## Client CLI
+
+`mailgate-api` is the agent-safe client: it reads the API token from the
+credential store at call time and attaches it automatically, so the token
+never lands in `.env`, memory, or an agent's working context.
+
+```bash
+mailgate-api list                     # latest messages (readable table)
+mailgate-api list --unread --limit 10
+mailgate-api list --json              # machine-readable JSON
+mailgate-api search "from:foo@bar.com"
+mailgate-api read <message_id>        # full body (403 if sensitive)
+mailgate-api send --to a@b.c --subject "Hi" --body "Hello"
+mailgate-api send --to a@b.c --subject "Hi" --body-file notes.md
+mailgate-api reply <message_id> --body "Thanks" [--reply-all]
+mailgate-api trash <message_id>       # move to Trash (403 if sensitive)
+mailgate-api healthz
+mailgate-api token                    # print the token (rarely needed)
+```
+
+`send`/`reply` accept `--body`, `--body-file`, or `--body -` (stdin).
+`list`/`read`/`search` accept `--json` for machine-readable output.
+
 ## API
 
-All endpoints (except `/healthz`) require an `Authorization: Bearer` token.
+All endpoints (except `/healthz`) require an `Authorization: Bearer <token>` token.
 
 | Method | Path | Description |
 |---|---|---|

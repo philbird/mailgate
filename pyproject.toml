@@ -23,6 +23,7 @@ dev = [
 [project.scripts]
 mailgate = "mailgate.server:main"
 mailgate-provision = "mailgate.provision:main"
+mailgate-api = "mailgate.cli:main"
 
 [build-system]
 requires = ["hatchling"]
