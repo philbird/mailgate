@@ -2,12 +2,14 @@
 
 An **air-gapped secure email intermediary for Gmail**. MailGate exposes a
 small local REST API that gives an AI agent (or any program) full email
-capabilities — read, search, reply, send, trash — while **strictly isolating
-credentials** and **redacting all OTP / 2FA / password-reset / security
+capabilities — read, search, reply, send, trash, mark read/unread — while
+**strictly isolating credentials** and **redacting all OTP / 2FA / password-reset / security
 verification messages** so they can never leak into an agent's context.
 
 Built for [Hermes Agent](https://hermes-agent.nousresearch.com/docs) but
 usable by any program that can speak HTTP.
+
+See the [release notes](CHANGELOG.md) for recent changes.
 
 ## Why
 
@@ -23,8 +25,8 @@ sits between the agent and Gmail and enforces a hard policy:
 2. **Deterministic OTP airgap** — messages matching security rules are
    intercepted *before* the agent sees them: excluded from list/search views
    (or returned masked as `[REDACTED]`), and hard-blocked on read.
-3. **Protected mutations** — the agent cannot reply to, delete, or trash a
-   flagged security/OTP message.
+3. **Protected mutations** — the agent cannot reply to, delete, trash, or
+   change the read status of a flagged security/OTP message.
 
 ## Architecture
 
@@ -36,8 +38,8 @@ Agent ──HTTP──▶ MailGate (FastAPI, 127.0.0.1:8765) ──IMAP/SMTP─�
 ```
 
 - **Runtime:** Python 3.11+, FastAPI, Uvicorn
-- **Email:** IMAP (`imapclient`) for read/search/trash, SMTP (`smtplib`) for
-  send/reply, over TLS with a Gmail **App Password**
+- **Email:** IMAP (`imapclient`) for read/search/trash and read status,
+  SMTP (`smtplib`) for send/reply, over TLS with a Gmail **App Password**
 - **Credentials:** macOS Keychain via the `security` CLI, with a portable
   `0600` file fallback (`~/.hermes/mailgate/credentials.json`)
 - **Service:** `launchd` plist for background execution
@@ -94,6 +96,8 @@ mailgate-api list --unread --limit 10
 mailgate-api list --json              # machine-readable JSON
 mailgate-api search "from:foo@bar.com"
 mailgate-api read <message_id>        # full body (403 if sensitive)
+mailgate-api mark-read <message_id>   # mark as read (403 if sensitive)
+mailgate-api mark-unread <message_id> # mark as unread (403 if sensitive)
 mailgate-api send --to a@b.c --subject "Hi" --body "Hello"
 mailgate-api send --to a@b.c --subject "Hi" --body-file notes.md
 mailgate-api reply <message_id> --body "Thanks" [--reply-all]
@@ -104,6 +108,9 @@ mailgate-api token                    # print the token (rarely needed)
 
 `send`/`reply` accept `--body`, `--body-file`, or `--body -` (stdin).
 `list`/`read`/`search` accept `--json` for machine-readable output.
+Readable list and read output includes the message's read status. Fetching
+messages uses IMAP PEEK and leaves that status unchanged; use `mark-read` or
+`mark-unread` to change it explicitly.
 
 ## API
 
@@ -113,16 +120,27 @@ All endpoints (except `/healthz`) require an `Authorization: Bearer <token>` tok
 |---|---|---|
 | `GET` | `/v1/messages` | Search/list. Params: `query` (Gmail syntax), `unread_only`, `limit`, `offset`. Sensitive messages are returned masked (`is_redacted: true`). |
 | `GET` | `/v1/messages/{id}` | Full message (HTML/plain → Markdown). `403` if sensitive. |
+| `PATCH` | `/v1/messages/{id}` | Set read status. Body `{"is_read": true}` or `{"is_read": false}` (required boolean). `403` if sensitive; `404` if missing. |
 | `POST` | `/v1/messages/{id}/reply` | Reply to a thread. Body `{"body": "...", "reply_all": false}`. `403` if the thread is sensitive. |
 | `POST` | `/v1/messages/send` | Send. Body `{"to": [...], "subject": "...", "body": "..."}`. |
 | `DELETE` | `/v1/messages/{id}` | Move to Trash. `403` if sensitive. |
 | `GET` | `/healthz` | Liveness check (no auth). |
 
-### Example
+Message IDs are positive Gmail IMAP UIDs in the inbox. List and full-message
+responses include `is_read`, a boolean; masked messages retain this field.
+Updating read status returns `{"status": "updated", "id": "12345", "is_read": true}`
+(or `false` when marking unread). Strings and numbers are not accepted for
+`is_read`.
+
+### Examples
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:8765/v1/messages?unread_only=true&limit=10"
+
+# Mark a message as read; use false to mark it unread.
+curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"is_read": true}' "http://127.0.0.1:8765/v1/messages/12345"
 ```
 
 ## Sensitive-email classification

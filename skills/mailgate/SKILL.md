@@ -1,6 +1,6 @@
 ---
 name: mailgate
-description: "Use when reading, searching, or sending Gmail via MailGate."
+description: "Use when reading, searching, sending, or marking Gmail read/unread via MailGate."
 version: 1.1.0
 author: philbird
 license: MIT
@@ -23,7 +23,7 @@ Repo: https://github.com/philbird/mailgate
 
 ## When to use
 
-- The user asks to read, search, reply to, send, or delete Gmail.
+- The user asks to read, search, reply to, send, delete, or mark Gmail read/unread.
 - Any task that touches a provisioned Gmail account.
 - **Never** use this for OTP/2FA codes — those are deliberately blocked.
 
@@ -52,6 +52,8 @@ cd ~/SourceCode/mailgate
 .venv/bin/mailgate-api list --json              # machine-readable JSON
 .venv/bin/mailgate-api search "from:foo@bar.com"
 .venv/bin/mailgate-api read <message_id>        # full body (403 if sensitive)
+.venv/bin/mailgate-api mark-read <message_id>   # mark as read (403 if sensitive)
+.venv/bin/mailgate-api mark-unread <message_id> # mark as unread (403 if sensitive)
 .venv/bin/mailgate-api send --to a@b.c --subject "Hi" --body "Hello"
 .venv/bin/mailgate-api send --to a@b.c --subject "Hi" --body-file notes.md
 .venv/bin/mailgate-api reply <message_id> --body "Thanks" [--reply-all]
@@ -62,6 +64,9 @@ cd ~/SourceCode/mailgate
 
 `send`/`reply` accept `--body`, `--body-file`, or `--body -` (read from stdin).
 `list`/`read`/`search` accept `--json` for machine-readable output.
+Readable list and read output includes the message's read status. Fetching
+messages uses IMAP PEEK and leaves that status unchanged; use `mark-read` or
+`mark-unread` to change it explicitly.
 
 ## Setup (one-time)
 
@@ -103,12 +108,17 @@ All endpoints (except `/healthz`) require `Authorization: Bearer <token>`.
 |---|---|---|
 | `GET` | `/v1/messages` | List/search. Params: `query` (Gmail syntax), `unread_only`, `limit` (default 20), `offset`. Sensitive messages returned masked (`is_redacted: true`, subject `[REDACTED]`). |
 | `GET` | `/v1/messages/{id}` | Full message (HTML→Markdown). `403` if sensitive. |
+| `PATCH` | `/v1/messages/{id}` | Set read status. Body `{"is_read": true}` or `{"is_read": false}` (required boolean). `403` if sensitive; `404` if missing. |
 | `POST` | `/v1/messages/{id}/reply` | Body `{\"body\": \"...\", \"reply_all\": false}`. `403` if thread sensitive. |
 | `POST` | `/v1/messages/send` | Body `{\"to\": [...], \"subject\": \"...\", \"body\": \"...\"}`. |
 | `DELETE` | `/v1/messages/{id}` | Move to Trash. `403` if sensitive. |
 | `GET` | `/healthz` | Liveness (no auth). |
 
-Message IDs are Gmail IMAP UIDs (stable per mailbox).
+Message IDs are positive Gmail IMAP UIDs in the inbox (stable per mailbox).
+List and full-message responses include `is_read`, a boolean; masked messages
+retain this field. Updating read status returns
+`{"status": "updated", "id": "12345", "is_read": true}` (or `false` when marking
+unread). Strings and numbers are not accepted for `is_read`.
 
 ### Raw examples (only if not using the CLI)
 
@@ -126,6 +136,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 # Read one message
 curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8765/v1/messages/12345"
 
+# Mark one message as read (use false to mark unread)
+curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"is_read":true}' "http://127.0.0.1:8765/v1/messages/12345"
+
 # Send
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"to":["bob@example.com"],"subject":"Hi","body":"Hello"}' \
@@ -136,7 +150,8 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 
 - **Redacted from list/search:** OTP/2FA/verification/password-reset messages
   appear as `is_redacted: true` with no subject/from/snippet.
-- **Hard-blocked (403):** reading, replying to, or deleting a sensitive message.
+- **Hard-blocked (403):** reading, replying to, deleting, or changing the read
+  status of a sensitive message.
 - **Credentials never exposed:** no endpoint returns the App Password or token.
 - **Loopback only:** binds `127.0.0.1`; never expose publicly.
 

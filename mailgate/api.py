@@ -4,19 +4,19 @@ Security model:
   * Every request requires ``Authorization: Bearer <token>`` where the token
     is read from the macOS Keychain (never from a file or env var).
   * Sensitive messages (OTP/2FA/verification) are excluded from list/search
-    results and hard-blocked (403) on read/reply/delete.
+    results and hard-blocked (403) on read/update/reply/delete.
   * Credentials never appear in any response body.
 """
 
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query
+from pydantic import BaseModel, Field, StrictBool
 
 from . import classifier
 from .config import Settings, load_settings
 from .credentials import CredentialError, get_address, get_api_token, get_app_password
-from .gmail import GmailClient
+from .gmail import GmailClient, MessageNotFoundError
 
 app = FastAPI(
     title="MailGate",
@@ -77,6 +77,10 @@ class ReplyRequest(BaseModel):
     reply_all: bool = False
 
 
+class UpdateMessageRequest(BaseModel):
+    is_read: StrictBool
+
+
 # --- Endpoints -----------------------------------------------------------
 
 @app.get("/v1/messages")
@@ -102,6 +106,7 @@ def list_messages(
                     "from": "[REDACTED]",
                     "date": meta["date"],
                     "snippet": "",
+                    "is_read": meta["is_read"],
                 }
             )
         else:
@@ -121,6 +126,27 @@ def get_message(message_id: str, _: None = Depends(_require_token)) -> dict:
             detail="Access denied: Message contains sensitive security/OTP contents",
         )
     return msg
+
+
+@app.patch("/v1/messages/{message_id}")
+def update_message(
+    req: UpdateMessageRequest,
+    message_id: str = Path(pattern=r"^[1-9][0-9]*$"),
+    _: None = Depends(_require_token),
+) -> dict:
+    client = _client()
+    try:
+        msg = client.fetch(message_id)
+        if classifier.is_sensitive(msg["subject"], msg["body"], msg["from"]):
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied: Cannot update a sensitive security/OTP message",
+            )
+        client.set_read(message_id, req.is_read)
+    except MessageNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Message not found") from exc
+
+    return {"status": "updated", "id": message_id, "is_read": req.is_read}
 
 
 @app.post("/v1/messages/{message_id}/reply")

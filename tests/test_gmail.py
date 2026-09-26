@@ -1,12 +1,16 @@
-"""Tests for GmailClient preview decoding and IMAP fetch-key handling."""
+"""Tests for GmailClient preview decoding, fetching, and read status."""
 
 from __future__ import annotations
 
 import base64
 
+import pytest
+from imapclient import SEEN
+
 from mailgate import classifier
 from mailgate.gmail import (
     GmailClient,
+    MessageNotFoundError,
     _HEADER_REQUEST,
     _TEXT_PREVIEW_REQUEST,
     _decode_preview,
@@ -100,14 +104,24 @@ class _FakeIMAP:
     """Answers fetch() keyed the way a real server responds (RFC 3501):
     PEEK stripped, and partial ranges keyed by origin octet only."""
 
-    def __init__(self, raw: bytes):
+    def __init__(self, raw: bytes, flags: tuple[bytes, ...] = ()):
         headers, text = _split(raw)
-        self._data = {b"BODY[HEADER]": headers, b"BODY[TEXT]<0>": text, b"SEQ": 1}
+        self._data = {
+            b"BODY[HEADER]": headers,
+            b"BODY[TEXT]<0>": text,
+            b"BODY[]": raw,
+            b"FLAGS": flags,
+            b"SEQ": 1,
+        }
         self.requested: list[bytes] | None = None
+        self.logged_out = False
 
     def fetch(self, uids, fields):
         self.requested = list(fields)
         return {uids[0]: dict(self._data)}
+
+    def logout(self):
+        self.logged_out = True
 
 
 def test_fetch_meta_reads_server_response_keys():
@@ -116,7 +130,7 @@ def test_fetch_meta_reads_server_response_keys():
     fake = _FakeIMAP(_b64_message("Your verification code is 123456"))
     client = GmailClient(address="me@gmail.com", app_password="x")
     meta = client._fetch_meta(fake, 42)
-    assert fake.requested == [_HEADER_REQUEST, _TEXT_PREVIEW_REQUEST]
+    assert fake.requested == [_HEADER_REQUEST, _TEXT_PREVIEW_REQUEST, b"FLAGS"]
     assert meta["subject"] == "Hello"
     assert "verification code" in meta["_preview"]
     assert meta["snippet"].startswith("Your verification code")
@@ -129,3 +143,114 @@ def test_fetch_meta_missing_uid_yields_empty_meta():
     meta = client._fetch_meta(fake, 99)
     assert meta["subject"] == ""
     assert meta["_preview"] == ""
+
+
+@pytest.mark.parametrize(
+    "flags, is_read", [((), False), ((b"\\Flagged",), False), ((SEEN, b"\\Answered"), True)]
+)
+def test_fetch_meta_read_status(flags, is_read):
+    fake = _FakeIMAP(PLAIN, flags)
+    client = GmailClient(address="me@gmail.com", app_password="x")
+    assert client._fetch_meta(fake, 42)["is_read"] is is_read
+
+
+@pytest.mark.parametrize(
+    "flags, is_read", [((), False), ((b"\\Flagged",), False), ((SEEN, b"\\Answered"), True)]
+)
+def test_fetch_read_status_without_marking_read(monkeypatch, flags, is_read):
+    fake = _FakeIMAP(PLAIN, flags)
+    client = GmailClient(address="me@gmail.com", app_password="x")
+    monkeypatch.setattr(client, "_connect_imap", lambda: fake)
+
+    message = client.fetch("42")
+
+    assert message["is_read"] is is_read
+    assert message["subject"] == "Lunch"
+    assert "See you at noon." in message["body"]
+    assert fake.requested == [b"BODY.PEEK[]", b"FLAGS"]
+    assert fake.logged_out
+
+
+def test_fetch_missing_message_logs_out(monkeypatch):
+    fake = _FakeIMAP(PLAIN)
+    fake.fetch = lambda uids, fields: {}
+    client = GmailClient(address="me@gmail.com", app_password="x")
+    monkeypatch.setattr(client, "_connect_imap", lambda: fake)
+
+    with pytest.raises(MessageNotFoundError):
+        client.fetch("42")
+
+    assert fake.logged_out
+
+
+class _FlagIMAP:
+    def __init__(
+        self, flags: tuple[bytes, ...], *, missing: bool = False, fail: bool = False
+    ):
+        self.flags = set(flags)
+        self.missing = missing
+        self.fail = fail
+        self.calls = []
+        self.logged_out = False
+
+    def add_flags(self, uids, flags):
+        return self._update("add", uids, flags)
+
+    def remove_flags(self, uids, flags):
+        return self._update("remove", uids, flags)
+
+    def _update(self, operation, uids, flags):
+        self.calls.append((operation, uids, flags))
+        if self.fail:
+            raise RuntimeError("IMAP store failed")
+        if self.missing:
+            return {}
+        if operation == "add":
+            self.flags.update(flags)
+        else:
+            self.flags.difference_update(flags)
+        return {uids[0]: tuple(self.flags)}
+
+    def logout(self):
+        self.logged_out = True
+
+
+@pytest.mark.parametrize("is_read", [True, False])
+@pytest.mark.parametrize("already_read", [True, False])
+def test_set_read_preserves_other_flags_and_is_idempotent(monkeypatch, is_read, already_read):
+    other_flags = (b"\\Flagged", b"\\Answered", b"custom-label")
+    initial_flags = other_flags + ((SEEN,) if already_read else ())
+    fake = _FlagIMAP(initial_flags)
+    client = GmailClient(address="me@gmail.com", app_password="x")
+    monkeypatch.setattr(client, "_connect_imap", lambda: fake)
+
+    client.set_read("42", is_read)
+
+    assert (SEEN in fake.flags) is is_read
+    assert fake.flags - {SEEN} == set(other_flags)
+    assert fake.calls == [("add" if is_read else "remove", [42], [SEEN])]
+    assert fake.logged_out
+
+
+@pytest.mark.parametrize("is_read", [True, False])
+def test_set_read_missing_message_logs_out(monkeypatch, is_read):
+    fake = _FlagIMAP((), missing=True)
+    client = GmailClient(address="me@gmail.com", app_password="x")
+    monkeypatch.setattr(client, "_connect_imap", lambda: fake)
+
+    with pytest.raises(MessageNotFoundError):
+        client.set_read("42", is_read)
+
+    assert fake.logged_out
+
+
+@pytest.mark.parametrize("is_read", [True, False])
+def test_set_read_failure_logs_out(monkeypatch, is_read):
+    fake = _FlagIMAP((), fail=True)
+    client = GmailClient(address="me@gmail.com", app_password="x")
+    monkeypatch.setattr(client, "_connect_imap", lambda: fake)
+
+    with pytest.raises(RuntimeError, match="IMAP store failed"):
+        client.set_read("42", is_read)
+
+    assert fake.logged_out

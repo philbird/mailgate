@@ -1,4 +1,4 @@
-"""Gmail connector — IMAP for read/search/trash, SMTP for send/reply.
+"""Gmail connector — IMAP for read/search/status/trash, SMTP for send/reply.
 
 Uses an App Password (not the account password) and connects over TLS. All
 message IDs exposed to the API are Gmail IMAP UIDs (stable per mailbox).
@@ -13,7 +13,7 @@ from email.parser import BytesParser
 from email.utils import getaddresses
 
 import html2text
-from imapclient import IMAPClient
+from imapclient import IMAPClient, SEEN
 
 # Bytes of the text body fetched for list-view classification. Keeps list
 # queries cheap (no attachments) while still catching OTP codes that appear
@@ -29,6 +29,10 @@ _HEADER_RESPONSE = b"BODY[HEADER]"
 # BODY.PEEK[TEXT]<0.4000> comes back keyed as BODY[TEXT]<0>.
 _TEXT_PREVIEW_REQUEST = b"BODY.PEEK[TEXT]<0.%d>" % _PREVIEW_BYTES
 _TEXT_PREVIEW_RESPONSE = b"BODY[TEXT]<0>"
+
+
+class MessageNotFoundError(LookupError):
+    """The requested UID is no longer present in the selected mailbox."""
 
 
 class GmailClient:
@@ -86,7 +90,7 @@ class GmailClient:
             client.logout()
 
     def _fetch_meta(self, client: IMAPClient, uid: int) -> dict:
-        data = client.fetch([uid], [_HEADER_REQUEST, _TEXT_PREVIEW_REQUEST])
+        data = client.fetch([uid], [_HEADER_REQUEST, _TEXT_PREVIEW_REQUEST, b"FLAGS"])
         raw = data.get(uid, {})
         headers = raw.get(_HEADER_RESPONSE, b"")
         text = raw.get(_TEXT_PREVIEW_RESPONSE, b"")
@@ -94,6 +98,7 @@ class GmailClient:
         msg, preview = _decode_preview(headers, text)
         return {
             "id": str(uid),
+            "is_read": SEEN in raw.get(b"FLAGS", ()),
             "subject": msg.get("Subject", "") or "",
             "from": msg.get("From", "") or "",
             "date": msg.get("Date", "") or "",
@@ -103,14 +108,32 @@ class GmailClient:
         }
 
     def fetch(self, message_id: str) -> dict:
-        """Fetch a full message by UID, returning a normalized dict."""
+        """Fetch a full message and its read status without marking it as read."""
         uid = int(message_id)
         client = self._connect_imap()
         try:
-            data = client.fetch([uid], [b"BODY.PEEK[]"])
+            data = client.fetch([uid], [b"BODY.PEEK[]", b"FLAGS"])
+            if uid not in data:
+                raise MessageNotFoundError(f"Message {message_id} not found")
             raw = data[uid][b"BODY[]"]
             msg = BytesParser(policy=policy.default).parsebytes(raw)
-            return self._message_to_dict(uid, msg)
+            result = self._message_to_dict(uid, msg)
+            result["is_read"] = SEEN in data[uid].get(b"FLAGS", ())
+            return result
+        finally:
+            client.logout()
+
+    def set_read(self, message_id: str, is_read: bool) -> None:
+        """Set the IMAP Seen flag, preserving all other message flags."""
+        uid = int(message_id)
+        client = self._connect_imap()
+        try:
+            if is_read:
+                flags = client.add_flags([uid], [SEEN])
+            else:
+                flags = client.remove_flags([uid], [SEEN])
+            if uid not in flags:
+                raise MessageNotFoundError(f"Message {message_id} not found")
         finally:
             client.logout()
 

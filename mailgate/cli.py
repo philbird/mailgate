@@ -13,6 +13,8 @@ Usage::
     mailgate-api search <query>
     mailgate-api send --to A [--to B] --subject S --body B | --body-file F
     mailgate-api reply <message_id> --body B [--reply-all]
+    mailgate-api mark-read <message_id>
+    mailgate-api mark-unread <message_id>
     mailgate-api trash <message_id>
     mailgate-api healthz
     mailgate-api token
@@ -34,7 +36,7 @@ from email.utils import parsedate_to_datetime
 from .config import Settings, load_settings
 from .credentials import CredentialError, get_api_token
 
-_HTTP_METHODS = {"get", "post", "delete"}
+_HTTP_METHODS = {"get", "post", "patch", "delete"}
 
 
 class ClientError(RuntimeError):
@@ -89,6 +91,14 @@ def _fmt_date(value: str | None) -> str:
         return value
 
 
+def _read_status(message: dict) -> str | None:
+    if message.get("is_read") is True:
+        return "Read"
+    if message.get("is_read") is False:
+        return "Unread"
+    return None
+
+
 def cmd_list(args: argparse.Namespace, settings: Settings) -> int:
     params = {"limit": str(args.limit), "offset": str(args.offset)}
     if args.query:
@@ -104,11 +114,13 @@ def cmd_list(args: argparse.Namespace, settings: Settings) -> int:
         print("No messages.")
         return 0
     for m in result["messages"]:
+        status = _read_status(m)
+        prefix = f"{m['id']}  " + (f"[{status.upper()}]  " if status else "")
         if m.get("is_redacted"):
-            line = f"{m['id']}  [REDACTED]  {_fmt_date(m.get('date'))}"
+            line = f"{prefix}[REDACTED]  {_fmt_date(m.get('date'))}"
         else:
             line = (
-                f"{m['id']}  {_fmt_date(m.get('date'))}  "
+                f"{prefix}{_fmt_date(m.get('date'))}  "
                 f"{(m.get('from') or '').split('<')[0].strip():<20}  {m.get('subject') or ''}"
             )
         print(line)
@@ -124,6 +136,9 @@ def cmd_read(args: argparse.Namespace, settings: Settings) -> int:
     print(f"From:    {result.get('from')}")
     print(f"Subject: {result.get('subject')}")
     print(f"Date:    {result.get('date')}")
+    status = _read_status(result)
+    if status:
+        print(f"Status:  {status}")
     print("-" * 60)
     print(result.get("body") or result.get("snippet") or "")
     return 0
@@ -164,6 +179,14 @@ def cmd_reply(args: argparse.Namespace, settings: Settings) -> int:
 
 def cmd_trash(args: argparse.Namespace, settings: Settings) -> int:
     result = request(settings, "delete", f"/v1/messages/{args.message_id}")
+    _emit(result, pretty=args.json)
+    return 0
+
+
+def cmd_set_read_state(args: argparse.Namespace, settings: Settings) -> int:
+    result = request(
+        settings, "patch", f"/v1/messages/{args.message_id}", {"is_read": args.is_read}
+    )
     _emit(result, pretty=args.json)
     return 0
 
@@ -227,6 +250,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_trash.add_argument("message_id")
     p_trash.add_argument("--json", action="store_true")
     p_trash.set_defaults(func=cmd_trash)
+
+    for command, is_read in (("mark-read", True), ("mark-unread", False)):
+        p_mark = sub.add_parser(command, help=f"mark a message as {'read' if is_read else 'unread'}")
+        p_mark.add_argument("message_id")
+        p_mark.add_argument("--json", action="store_true")
+        p_mark.set_defaults(func=cmd_set_read_state, is_read=is_read)
 
     p_health = sub.add_parser("healthz", help="check service health")
     p_health.set_defaults(func=cmd_healthz)
